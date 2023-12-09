@@ -1,0 +1,176 @@
+---
+- name: Install OpenStack Neutron OpenvSwitch
+  yum:
+    name: openstack-neutron-openvswitch
+    state: present
+
+- name: Configure Networking Common Component
+  become: true
+  blockinfile:
+    path: /etc/neutron/neutron.conf
+    marker: "# START ANSIBLE MANAGED BLOCK"
+    block: |
+      [database]
+      # ...
+
+      [DEFAULT]
+      # ...
+      transport_url = rabbit://openstack:RABBIT_PASS@controller
+
+      [DEFAULT]
+      # ...
+      auth_strategy = keystone
+
+      [keystone_authtoken]
+      # ...
+      www_authenticate_uri = http://controller:5000
+      auth_url = http://controller:5000
+      memcached_servers = controller:11211
+      auth_type = password
+      project_domain_name = Default
+      user_domain_name = Default
+      project_name = service
+      username = neutron
+      password = NEUTRON_PASS
+  vars:
+    RABBIT_PASS: "your_rabbit_password"
+    NEUTRON_PASS: "your_neutron_password"
+
+- name: Configure Lock Path in oslo_concurrency
+  lineinfile:
+    path: /etc/neutron/neutron.conf
+    line: "lock_path = /var/lib/neutron/tmp"
+    state: present
+    insertafter: "# [oslo_concurrency]"
+
+- name: Configure Compute Service to Use Networking Service
+  blockinfile:
+    path: /etc/nova/nova.conf
+    marker: "# START ANSIBLE MANAGED BLOCK"
+    block: |
+      [neutron]
+      # ...
+      auth_url = http://controller:5000
+      auth_type = password
+      project_domain_name = Default
+      user_domain_name = Default
+      region_name = RegionOne
+      project_name = service
+      username = neutron
+      password = NEUTRON_PASS
+  vars:
+    NEUTRON_PASS: "your_neutron_password"
+
+- name: Start and Enable Neutron OpenvSwitch Agent
+  systemd:
+    name: neutron-openvswitch-agent.service
+    enabled: yes
+    state: started
+
+- name: Install OpenStack Dashboard
+  yum:
+    name: openstack-dashboard
+    state: present
+
+- name: Configure OpenStack Dashboard
+  lineinfile:
+    path: /etc/openstack-dashboard/local_settings
+    line: "{{ item.line }}"
+    state: present
+  loop:
+    - line: "OPENSTACK_HOST = 'controller'"
+    - line: "ALLOWED_HOSTS = ['one.example.com', 'two.example.com']"
+    - line: "# SESSION_ENGINE = 'django.contrib.sessions.backends.db'"
+    - line: "SESSION_ENGINE = 'django.contrib.sessions.backends.cache'"
+    - line: "CACHES = {\n    'default': {\n        'BACKEND': 'django.core.cache.backends.memcached.MemcachedCache',\n        'LOCATION': 'controller:11211',\n    }\n}"
+    - line: "# OPENSTACK_KEYSTONE_URL = \"http://%s/identity/v3\" % OPENSTACK_HOST"
+    - line: "OPENSTACK_KEYSTONE_URL = \"http://%s:5000/identity/v3\" % OPENSTACK_HOST"
+    - line: "OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT = True"
+    - line: "OPENSTACK_API_VERSIONS = {\n    'identity': 3,\n    'image': 2,\n    'volume': 3,\n}"
+    - line: "OPENSTACK_KEYSTONE_DEFAULT_DOMAIN = 'Default'"
+    - line: "OPENSTACK_KEYSTONE_DEFAULT_ROLE = 'user'"
+    - line: "OPENSTACK_NEUTRON_NETWORK = {\n    'enable_router': False,\n    'enable_quotas': False,\n    'enable_distributed_router': False,\n    'enable_ha_router': False,\n    'enable_fip_topology_check': False,\n}"
+    - line: "# TIME_ZONE = 'UTC'"
+    - line: "# TIME_ZONE = 'America/Los_Angeles'"
+    - line: "TIME_ZONE = 'Asia/Shanghai'"  # Replace 'Your_Time_Zone' with the appropriate time zone identifier
+
+- name: Add WSGIApplicationGroup to openstack-dashboard.conf
+  lineinfile:
+    path: /etc/httpd/conf.d/openstack-dashboard.conf
+    line: "WSGIApplicationGroup %{GLOBAL}"
+    state: present
+
+- name: Restart Web Server and Session Storage Service
+  systemd:
+    name: "{{ item }}"
+    state: restarted
+  loop:
+    - httpd.service
+    - memcached.service
+  failed_when: false
+  no_log: true
+
+- name: Install OpenStack Cinder
+  yum:
+    name: openstack-cinder
+    state: present
+
+- name: Configure Cinder
+  blockinfile:
+    path: /etc/cinder/cinder.conf
+    marker: "# START ANSIBLE MANAGED BLOCK"
+    block: |
+      [database]
+      # ...
+      connection = mysql+pymysql://cinder:CINDER_DBPASS@controller/cinder
+
+      [DEFAULT]
+      # ...
+      transport_url = rabbit://openstack:RABBIT_PASS@controller
+      auth_strategy = keystone
+
+      [keystone_authtoken]
+      # ...
+      www_authenticate_uri = http://controller:5000
+      auth_url = http://controller:5000
+      memcached_servers = controller:11211
+      auth_type = password
+      project_domain_name = default
+      user_domain_name = default
+      project_name = service
+      username = cinder
+      password = CINDER_PASS
+      my_ip = 10.0.0.11
+
+      [oslo_concurrency]
+      # ...
+      lock_path = /var/lib/cinder/tmp
+  vars:
+    RABBIT_PASS: "your_rabbit_password"
+    CINDER_DBPASS: "your_cinder_db_password"
+    CINDER_PASS: "your_cinder_password"
+
+- name: Populate Block Storage Database
+  command: "su -s /bin/sh -c 'cinder-manage db sync' cinder"
+  failed_when: false
+  no_log: true
+
+- name: Configure Nova to use Block Storage
+  lineinfile:
+    path: /etc/nova/nova.conf
+    line: "[cinder]\nos_region_name = RegionOne"
+    state: present
+
+- name: Restart Nova API service
+  systemd:
+    name: openstack-nova-api.service
+    state: restarted
+
+- name: Start and Enable Cinder Services
+  systemd:
+    name: "{{ item }}"
+    enabled: yes
+    state: started
+  loop:
+    - openstack-cinder-api.service
+    - openstack-cinder-scheduler.service

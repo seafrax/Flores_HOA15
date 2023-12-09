@@ -1,0 +1,302 @@
+---
+- name: Install Neutron components
+  become: yes
+  apt:
+    name:
+      - neutron-server
+      - neutron-plugin-ml2
+      - neutron-openvswitch-agent
+      - neutron-dhcp-agent
+      - neutron-metadata-agent
+    state: present
+
+- name: Configure Neutron server
+  become: yes
+  blockinfile:
+    path: /etc/neutron/neutron.conf
+    block: |
+      [database]
+      connection = mysql+pymysql://neutron:NEUTRON_DBPASS@controller/neutron
+
+      [DEFAULT]
+      core_plugin = ml2
+      service_plugins =
+      transport_url = rabbit://openstack:RABBIT_PASS@controller
+
+      [DEFAULT]
+      auth_strategy = keystone
+
+      [keystone_authtoken]
+      www_authenticate_uri = http://controller:5000
+      auth_url = http://controller:5000
+      memcached_servers = controller:11211
+      auth_type = password
+      project_domain_name = Default
+      user_domain_name = Default
+      project_name = service
+      username = neutron
+      password = NEUTRON_PASS
+
+      [DEFAULT]
+      notify_nova_on_port_status_changes = true
+      notify_nova_on_port_data_changes = true
+
+      [nova]
+      auth_url = http://controller:5000
+      auth_type = password
+      project_domain_name = Default
+      user_domain_name = Default
+      region_name = RegionOne
+      project_name = service
+      username = nova
+      password = NOVA_PASS
+
+      [oslo_concurrency]
+      lock_path = /var/lib/neutron/tmp
+    insertafter: EOF
+
+- name: Configure ML2 plugin
+  become: yes
+  blockinfile:
+    path: /etc/neutron/plugins/ml2/ml2_conf.ini
+    block: |
+      [ml2]
+      type_drivers = flat,vlan
+      tenant_network_types =
+
+      [ml2]
+      mechanism_drivers = openvswitch
+
+      [ml2]
+      extension_drivers = port_security
+
+      [ml2_type_flat]
+      flat_networks = provider
+    insertafter: EOF
+
+- name: Configure Open vSwitch agent
+  become: yes
+  blockinfile:
+    path: /etc/neutron/plugins/ml2/openvswitch_agent.ini
+    block: |
+      [ovs]
+      bridge_mappings = provider:PROVIDER_INTERFACE_NAME
+
+      [securitygroup]
+      enable_security_group = true
+      firewall_driver = openvswitch
+    insertafter: EOF
+
+- name: Configure DHCP agent
+  become: yes
+  blockinfile:
+    path: /etc/neutron/dhcp_agent.ini
+    block: |
+      [DEFAULT]
+      interface_driver = openvswitch
+      dhcp_driver = neutron.agent.linux.dhcp.Dnsmasq
+      enable_isolated_metadata = true
+    insertafter: EOF
+
+- name: Restart nova-api service
+  become: yes
+  systemd:
+    name: nova-api
+    state: restarted
+
+- name: Restart neutron-server service
+  become: yes
+  systemd:
+    name: neutron-server
+    state: restarted
+
+- name: Restart neutron-openvswitch-agent service
+  become: yes
+  systemd:
+    name: neutron-openvswitch-agent
+    state: restarted
+
+- name: Restart neutron-dhcp-agent service
+  become: yes
+  systemd:
+    name: neutron-dhcp-agent
+    state: restarted
+
+- name: Restart neutron-metadata-agent service
+  become: yes
+  systemd:
+    name: neutron-metadata-agent
+    state: restarted
+
+
+- name: Install OpenStack Dashboard
+  become: yes
+  apt:
+    name: openstack-dashboard
+    state: present
+
+- name: Edit local_settings.py
+  become: yes
+  lineinfile:
+    path: /etc/openstack-dashboard/local_settings.py
+    regexp: "^OPENSTACK_HOST"
+    line: "OPENSTACK_HOST = 'controller'"
+
+- name: Configure ALLOWED_HOSTS
+  become: yes
+  lineinfile:
+    path: /etc/openstack-dashboard/local_settings.py
+    regexp: "^ALLOWED_HOSTS"
+    line: "ALLOWED_HOSTS = ['one.example.com', 'two.example.com']"
+
+- name: Configure SESSION_ENGINE and CACHES
+  become: yes
+  lineinfile:
+    path: /etc/openstack-dashboard/local_settings.py
+    regexp: "^SESSION_ENGINE|^CACHES"
+    line: |
+      SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
+
+      CACHES = {
+          'default': {
+              'BACKEND': 'django.core.cache.backends.memcached.MemcachedCache',
+              'LOCATION': 'controller:11211',
+          }
+      }
+
+- name: Enable Identity API version 3
+  become: yes
+  lineinfile:
+    path: /etc/openstack-dashboard/local_settings.py
+    regexp: "^OPENSTACK_KEYSTONE_URL"
+    line: "OPENSTACK_KEYSTONE_URL = 'http://%s/identity/v3' % OPENSTACK_HOST"
+
+- name: Enable support for domains
+  become: yes
+  lineinfile:
+    path: /etc/openstack-dashboard/local_settings.py
+    regexp: "^OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT"
+    line: "OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT = True"
+
+- name: Configure API versions
+  become: yes
+  lineinfile:
+    path: /etc/openstack-dashboard/local_settings.py
+    regexp: "^OPENSTACK_API_VERSIONS"
+    line: |
+      OPENSTACK_API_VERSIONS = {
+          "identity": 3,
+          "image": 2,
+          "volume": 3,
+      }
+
+- name: Configure default domain and role
+  become: yes
+  lineinfile:
+    path: /etc/openstack-dashboard/local_settings.py
+    regexp: "^OPENSTACK_KEYSTONE_DEFAULT_DOMAIN|^OPENSTACK_KEYSTONE_DEFAULT_ROLE"
+    line: |
+      OPENSTACK_KEYSTONE_DEFAULT_DOMAIN = "Default"
+      OPENSTACK_KEYSTONE_DEFAULT_ROLE = "user"
+
+- name: Disable support for layer-3 networking services (if networking option 1)
+  become: yes
+  lineinfile:
+    path: /etc/openstack-dashboard/local_settings.py
+    regexp: "^OPENSTACK_NEUTRON_NETWORK"
+    line: |
+      OPENSTACK_NEUTRON_NETWORK = {
+          'enable_router': False,
+          'enable_quotas': False,
+          'enable_ipv6': False,
+          'enable_distributed_router': False,
+          'enable_ha_router': False,
+          'enable_fip_topology_check': False,
+      }
+
+- name: Optionally configure the time zone
+  become: yes
+  lineinfile:
+    path: /etc/openstack-dashboard/local_settings.py
+    regexp: "^TIME_ZONE"
+    line: "TIME_ZONE = 'TIME_ZONE'"
+
+- name: Add WSGIApplicationGroup line to openstack-dashboard.conf
+  become: yes
+  lineinfile:
+    path: /etc/apache2/conf-available/openstack-dashboard.conf
+    line: "WSGIApplicationGroup %{GLOBAL}"
+
+- name: Reload web server configuration
+  become: yes
+  systemd:
+    name: apache2
+    state: reloaded
+
+- name: Install Cinder API and Scheduler
+  become: yes
+  apt:
+    name:
+      - cinder-api
+      - cinder-scheduler
+    state: present
+
+
+- name: Edit Cinder configuration file
+  blockinfile:
+    path: /etc/cinder/cinder.conf
+    block: |
+      [database]
+      connection = mysql+pymysql://cinder:{{ CINDER_DBPASS }}@controller/cinder
+
+      [DEFAULT]
+      transport_url = rabbit://openstack:{{ RABBIT_PASS }}@controller
+      auth_strategy = keystone
+      my_ip = 10.0.0.11
+
+      [keystone_authtoken]
+      www_authenticate_uri = http://controller:5000
+      auth_url = http://controller:5000
+      memcached_servers = controller:11211
+      auth_type = password
+      project_domain_name = default
+      user_domain_name = default
+      project_name = service
+      username = cinder
+      password = {{ CINDER_PASS }}
+
+      [oslo_concurrency]
+      lock_path = /var/lib/cinder/tmp
+    insertafter: EOF
+  
+- name: Populate Block Storage database
+  become: yes
+  shell: "su -s /bin/sh -c 'cinder-manage db sync' cinder"
+  failed_when: false
+  no_log: true
+
+- name: Configure Compute to use Block Storage
+  become: yes
+  lineinfile:
+    path: /etc/nova/nova.conf
+    regexp: "^os_region_name"
+    line: "os_region_name = RegionOne"
+    insertafter: EOF
+
+- name: Restart Compute API service
+  become: yes
+  systemd:
+    name: nova-api
+    state: restarted
+
+- name: Restart Block Storage services
+  become: yes
+  systemd:
+    name: cinder-scheduler
+    state: restarted
+
+- name: Restart Apache service
+  become: yes
+  systemd:
+    name: apache2
+    state: restarted
